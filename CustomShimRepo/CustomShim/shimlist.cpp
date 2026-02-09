@@ -5,6 +5,7 @@
 
 #include "Shim_AcceptEula.h"
 #include "Shim_FakeSchTask.h"
+#include "Shim_Win11VersionLie.h"
 // Include your shim declarations here...
 
 // This DLL loads early in the process's life, even before the C++ runtime library is ready.
@@ -16,6 +17,7 @@ void EnsureShimsInstantiated() {
 	knownShims = new std::vector<Shim*>();
 	knownShims->push_back(new Shim_AcceptEula());
 	knownShims->push_back(new Shim_FakeSchTask());
+	knownShims->push_back(new Shim_Win11VersionLie());
 	// Instantiate and add your shims here...
 	ASL_PRINTF(ASL_LEVEL_TRACE, "Instantiated %d shims", knownShims->size());
 }

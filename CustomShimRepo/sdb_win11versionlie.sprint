@@ -1,0 +1,43 @@
+// This is a SprintDLL script. To run it, execute: sprintdll.exe run sdb_win11versionlie.sprint
+// Creates an SDB file that applies the Win11VersionLie shim to Call of Duty.
+// To add more apps, duplicate the EXE section below with a different executable name.
+
+call apphelp.dll!SdbCreateDatabase /return native /into pdb (lpwstr "Win11VersionLie.sdb", int 0)
+call apphelp.dll!SdbBeginWriteListTag /return int /into tDatabase (slotdata pdb, int 0x7001)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6001, lpwstr "Win11VersionLie Database")
+call apphelp.dll!SdbWriteBinaryTag (slotdata pdb, int 0x9007, lpstr "Win11VerLieDBSdb", int 0x10)
+call apphelp.dll!SdbWriteQWORDTag (slotdata pdb, int 0x5001, long 0)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6022, lpwstr "3.0.0.9")
+call apphelp.dll!SdbWriteDWORDTag (slotdata pdb, int 0x4021, int 39)
+call apphelp.dll!SdbWriteDWORDTag (slotdata pdb, int 0x4055, int 0)
+
+// LIBRARY: Define the Win11VersionLie shim
+call apphelp.dll!SdbBeginWriteListTag /return int /into tLibrary (slotdata pdb, int 0x7002)
+call apphelp.dll!SdbBeginWriteListTag /return int /into tShim1 (slotdata pdb, int 0x7004)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6001, lpwstr "Win11VersionLie")
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x600A, lpwstr "AcRes.dll")
+call apphelp.dll!SdbWriteBinaryTag (slotdata pdb, int 0x9010, lpstr "Win11VerLieShimS", int 0x10)
+call apphelp.dll!SdbWriteDWORDTag (slotdata pdb, int 0x4021, int 39)
+call apphelp.dll!SdbWriteNULLTag (slotdata pdb, int 0x1002)
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tShim1)
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tLibrary)
+
+// EXE: Apply Win11VersionLie to cod.exe
+call apphelp.dll!SdbBeginWriteListTag /return int /into tExe1 (slotdata pdb, int 0x7007)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6001, lpwstr "cod.exe")
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6006, lpwstr "Call of Duty")
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6005, lpwstr "Activision")
+call apphelp.dll!SdbWriteBinaryTag (slotdata pdb, int 0x9004, lpstr "COD EXE Win11Ver", int 0x10)
+call apphelp.dll!SdbWriteBinaryTag (slotdata pdb, int 0x9011, lpstr "COD app Win11Ver", int 0x10)
+call apphelp.dll!SdbWriteDWORDTag (slotdata pdb, int 0x4021, int 39)
+call apphelp.dll!SdbBeginWriteListTag /return int /into tMatching1 (slotdata pdb, int 0x7008)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6001, lpwstr "*")
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6010, lpwstr "Call of Duty")
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tMatching1)
+call apphelp.dll!SdbBeginWriteListTag /return int /into tShimref1 (slotdata pdb, int 0x7009)
+call apphelp.dll!SdbWriteStringTag (slotdata pdb, int 0x6001, lpwstr "Win11VersionLie")
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tShimref1)
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tExe1)
+
+call apphelp.dll!SdbEndWriteListTag (slotdata pdb, slotdata tDatabase)
+call apphelp.dll!SdbCloseDatabaseWrite (slotdata pdb)
