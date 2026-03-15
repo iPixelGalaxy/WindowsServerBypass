@@ -18,6 +18,16 @@
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+function Exit-Error {
+    param([string]$Message = "")
+    if ($Message) {
+        Write-Host "`n[ERROR] $Message" -ForegroundColor Red
+    }
+    Write-Host "`nPress Enter to close..." -ForegroundColor Yellow
+    $null = Read-Host
+    exit 1
+}
+
 # --- File paths ---
 $AcResDll       = Join-Path $ScriptDir "AcRes.dll"
 $SprintDll      = Join-Path $ScriptDir "SprintDLL.exe"
@@ -28,7 +38,7 @@ $Sys32AcResOrig = "$env:SystemRoot\System32\AcRes.orig"
 $SdbName        = "Win11VersionLie"
 
 # --- Presets ---
-$Presets = @{
+$Presets = [ordered]@{
     "Call of Duty" = @("cod.exe", "cod24-cod.exe", "cod25-cod.exe")
     "Oculus/Meta"  = @(
         "OculusSetup.exe", "OculusClient.exe", "OVRServer_x64.exe",
@@ -53,7 +63,7 @@ function Test-RequiredFiles {
         Write-Host "`n[ERROR] Missing required files:" -ForegroundColor Red
         $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
         Write-Host "`nMake sure these files are in: $ScriptDir" -ForegroundColor Yellow
-        exit 1
+        Exit-Error
     }
 }
 
@@ -113,8 +123,7 @@ function Select-Executables {
     }
 
     if ($selectedExes.Count -eq 0) {
-        Write-Host "`n[ERROR] No executables selected. Nothing to install." -ForegroundColor Red
-        exit 1
+        Exit-Error "No executables selected. Nothing to install."
     }
 
     Write-Host "`n--- Selected Targets ---" -ForegroundColor Cyan
@@ -192,24 +201,26 @@ function Remove-OldSdb {
     $sdbRegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\InstalledSDB"
     if (Test-Path $sdbRegPath) {
         Get-ChildItem $sdbRegPath -ErrorAction SilentlyContinue | ForEach-Object {
-            $desc = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DatabaseDescription
-            $dbPath = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DatabasePath
-            if ($desc -like "*Win11VersionLie*" -or ($dbPath -and $dbPath -like "*Win11VersionLie*")) {
-                Write-Host "  Uninstalling: $desc" -ForegroundColor Yellow
-                if ($dbPath -and (Test-Path $dbPath)) {
-                    & sdbinst.exe -u $dbPath 2>$null
-                } else {
-                    # Try uninstall by GUID
-                    $guid = $_.PSChildName
-                    & sdbinst.exe -u -g $guid 2>$null
+            try {
+                $desc   = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DatabaseDescription
+                $dbPath = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DatabasePath
+                if ($desc -like "*Win11VersionLie*" -or ($dbPath -and $dbPath -like "*Win11VersionLie*")) {
+                    Write-Host "  Uninstalling: $desc" -ForegroundColor Yellow
+                    if ($dbPath -and (Test-Path $dbPath)) {
+                        & sdbinst.exe -u $dbPath 2>&1 | Out-Null
+                    } else {
+                        # Uninstall by GUID
+                        $guid = $_.PSChildName
+                        & sdbinst.exe -u $guid 2>&1 | Out-Null
+                    }
                 }
-            }
+            } catch {}
         }
     }
 
     # Also try direct uninstall of the SDB file if it exists in the script dir
     if (Test-Path $SdbFile) {
-        & sdbinst.exe -u $SdbFile 2>$null
+        try { & sdbinst.exe -u $SdbFile 2>&1 | Out-Null } catch {}
     }
 
     Write-Host "  Done." -ForegroundColor Green
@@ -232,8 +243,32 @@ function Install-AcResDll {
 
     # Copy our custom DLL
     Write-Host "  Copying shim DLL to System32..." -ForegroundColor Yellow
-    Copy-Item $AcResDll $Sys32AcRes -Force
-    Write-Host "  Installed: $Sys32AcRes" -ForegroundColor Green
+    try {
+        Copy-Item $AcResDll $Sys32AcRes -Force
+        Write-Host "  Installed: $Sys32AcRes" -ForegroundColor Green
+    } catch {
+        # File is locked by a running process - check if what's already there is identical
+        $srcHash = (Get-FileHash $AcResDll    -Algorithm SHA256).Hash
+        $dstHash = (Get-FileHash $Sys32AcRes  -Algorithm SHA256).Hash
+        if ($srcHash -eq $dstHash) {
+            Write-Host "  Shim DLL already up to date (file in use, skipped)" -ForegroundColor Green
+        } else {
+            # Different version - schedule replacement on next reboot via MoveFileEx
+            if (-not ('NativeFile' -as [type])) {
+                Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class NativeFile { [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, uint dwFlags); }'
+            }
+            $pendingPath = "$Sys32AcRes.pending"
+            Copy-Item $AcResDll $pendingPath -Force
+            # MOVEFILE_REPLACE_EXISTING (0x1) | MOVEFILE_DELAY_UNTIL_REBOOT (0x4)
+            $ok = [NativeFile]::MoveFileEx($pendingPath, $Sys32AcRes, 0x5)
+            if ($ok) {
+                Write-Host "  AcRes.dll is in use - replacement scheduled for next reboot." -ForegroundColor Yellow
+                Write-Host "  The SDB will be installed now; reboot to activate the updated DLL." -ForegroundColor Yellow
+            } else {
+                Exit-Error "AcRes.dll is locked and could not be scheduled for replacement (MoveFileEx failed)."
+            }
+        }
+    }
 }
 
 # --- Generate SDB and install ---
@@ -246,14 +281,16 @@ function Install-Sdb {
         Write-Host "  Running SprintDLL..." -ForegroundColor Yellow
         & ".\SprintDLL.exe" run ".\Win11VersionLie.sprint"
         if (-not (Test-Path $SdbFile)) {
-            Write-Host "  [ERROR] SDB file was not created!" -ForegroundColor Red
-            exit 1
+            Exit-Error "SDB file was not created by SprintDLL!"
         }
         Write-Host "  Generated: $SdbFile" -ForegroundColor Green
 
         # Install SDB
         Write-Host "  Installing SDB..." -ForegroundColor Yellow
-        & sdbinst.exe $SdbFile
+        & sdbinst.exe $SdbFile 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Exit-Error "sdbinst.exe failed (exit code $LASTEXITCODE)!"
+        }
         Write-Host "  SDB installed successfully!" -ForegroundColor Green
     } finally {
         Pop-Location
@@ -278,11 +315,26 @@ function Invoke-Uninstall {
     Write-Host "`nUninstall complete!`n" -ForegroundColor Cyan
 }
 
+# ===== Trap for unexpected errors =====
+# trap catches real terminating errors but does NOT intercept exit calls,
+# so Exit-Error's Read-Host+exit pattern is unaffected.
+trap {
+    Write-Host "`n[ERROR] An unexpected error occurred:" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Red
+    Write-Host "`nStack trace:" -ForegroundColor DarkGray
+    Write-Host "  $($_.ScriptStackTrace)" -ForegroundColor DarkGray
+    Write-Host "`nPress Enter to close..." -ForegroundColor Yellow
+    $null = Read-Host
+    exit 1
+}
+
 # ===== Main =====
 $action = $args[0]
 
 if ($action -eq "-uninstall") {
     Invoke-Uninstall
+    Write-Host "Press Enter to close..." -ForegroundColor Yellow
+    $null = Read-Host
     exit 0
 }
 
@@ -293,6 +345,8 @@ Write-Host ""
 $confirm = Read-Host "Proceed with installation? (Y/n)"
 if ($confirm -match "^[Nn]") {
     Write-Host "Cancelled." -ForegroundColor Yellow
+    Write-Host "Press Enter to close..." -ForegroundColor Yellow
+    $null = Read-Host
     exit 0
 }
 
@@ -308,5 +362,5 @@ Write-Host "`nThe following apps will now see Windows 11 24H2 Workstation:" -For
 $exeList | ForEach-Object { Write-Host "  * $_" -ForegroundColor White }
 Write-Host "`nTo uninstall: double-click Uninstall.cmd (or run .\Install.ps1 -uninstall)" -ForegroundColor Yellow
 Write-Host "To add/change apps: double-click Install.cmd again`n" -ForegroundColor Yellow
-
-& timeout /t 30
+Write-Host "Press Enter to close..." -ForegroundColor Yellow
+$null = Read-Host

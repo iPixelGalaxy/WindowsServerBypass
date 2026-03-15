@@ -1,2 +1,8 @@
 @echo off
-powershell -Command "Start-Process powershell -ArgumentList '-ExecutionPolicy Bypass -File \"%~dp0Install.ps1\"' -Verb RunAs"
+net session >nul 2>&1
+if %errorLevel% == 0 goto :run
+powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+exit /b
+:run
+cd /d "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "Install.ps1"

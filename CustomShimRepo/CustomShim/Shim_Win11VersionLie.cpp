@@ -19,6 +19,15 @@ void Shim_Win11VersionLie::RegisterHooks() {
 	ADD_HOOK("KERNEL32.DLL", "GetVersionExA", Hook_GetVersionExA);
 	ADD_HOOK("KERNEL32.DLL", "GetVersionExW", Hook_GetVersionExW);
 	ADD_HOOK("KERNEL32.DLL", "VerifyVersionInfoW", Hook_VerifyVersionInfoW);
+	ADD_HOOK("KERNEL32.DLL", "GetProductInfo", Hook_GetProductInfo);
+	ADD_HOOK("ADVAPI32.DLL", "RegGetValueW", Hook_RegGetValueW);
+	ADD_HOOK("ADVAPI32.DLL", "RegGetValueA", Hook_RegGetValueA);
+	ADD_HOOK("ADVAPI32.DLL", "RegQueryValueExW", Hook_RegQueryValueExW);
+	ADD_HOOK("ADVAPI32.DLL", "RegQueryValueExA", Hook_RegQueryValueExA);
+	ADD_HOOK("SHLWAPI.DLL", "SHGetValueW", Hook_SHGetValueW);
+	ADD_HOOK("SHLWAPI.DLL", "SHGetValueA", Hook_SHGetValueA);
+	ADD_HOOK("SHLWAPI.DLL", "IsOS", Hook_IsOS);
+	ADD_HOOK("NTDLL.DLL", "NtQueryValueKey", Hook_NtQueryValueKey);
 	ADD_HOOK("NTDLL.DLL", "RtlGetVersion", Hook_RtlGetVersion);
 }
 
@@ -144,6 +153,215 @@ BOOL WINAPI Shim_Win11VersionLie::Hook_VerifyVersionInfoW(LPOSVERSIONINFOEXW lpV
 	// If either check failed, set the expected error code
 	SetLastError(ERROR_OLD_WIN_VERSION);
 	return FALSE;
+}
+
+BOOL WINAPI Shim_Win11VersionLie::Hook_GetProductInfo(DWORD dwOSMajorVersion, DWORD dwOSMinorVersion, DWORD dwSpMajorVersion, DWORD dwSpMinorVersion, PDWORD pdwReturnedProductType) {
+	DEFINE_NEXT(Hook_GetProductInfo);
+	BOOL result = next(dwOSMajorVersion, dwOSMinorVersion, dwSpMajorVersion, dwSpMinorVersion, pdwReturnedProductType);
+	if (!result || !pdwReturnedProductType) return result;
+
+	// PRODUCT_PROFESSIONAL = 0x30 (Windows 11 Pro workstation SKU)
+	// Replace any server/unlicensed SKU so apps don't reject the OS edition.
+	ASL_PRINTF(ASL_LEVEL_TRACE, "GetProductInfo -> replacing product type 0x%08X with PRODUCT_PROFESSIONAL", *pdwReturnedProductType);
+	*pdwReturnedProductType = 0x00000030; // PRODUCT_PROFESSIONAL
+	return result;
+}
+
+// Registry value names whose values identify the OS edition.
+// We spoof these to look like a standard Windows 11 Pro workstation install.
+struct RegSpoof { LPCWSTR name; LPCWSTR value; };
+static const RegSpoof REG_SPOOFS[] = {
+	{ L"EditionID",        L"Professional"  },  // "ServerDatacenter" -> "Professional"
+	{ L"InstallationType", L"Client"        },  // "Server" -> "Client"
+	{ L"ProductName",      L"Windows 11 Pro"},  // "Windows Server 2025 Datacenter" -> "Windows 11 Pro"
+};
+
+static LPCWSTR GetSpoofedRegValue(LPCWSTR valueName) {
+	if (!valueName) return nullptr;
+	for (const auto& s : REG_SPOOFS) {
+		if (_wcsicmp(valueName, s.name) == 0)
+			return s.value;
+	}
+	return nullptr;
+}
+
+// Writes a REG_SZ value into the output buffers, handling size-query (pvData==NULL) and
+// ERROR_MORE_DATA correctly for both RegGetValueW and RegQueryValueExW callers.
+static LONG WriteRegistrySZ(LPCWSTR value, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData) {
+	DWORD needed = (DWORD)((wcslen(value) + 1) * sizeof(WCHAR));
+	if (pdwType) *pdwType = REG_SZ;
+	if (!pvData) {
+		if (pcbData) *pcbData = needed;
+		return ERROR_SUCCESS;
+	}
+	if (!pcbData || *pcbData < needed) {
+		if (pcbData) *pcbData = needed;
+		return ERROR_MORE_DATA;
+	}
+	*pcbData = needed;
+	memcpy(pvData, value, needed);
+	return ERROR_SUCCESS;
+}
+
+LONG WINAPI Shim_Win11VersionLie::Hook_RegGetValueW(HKEY hkey, LPCWSTR lpSubKey, LPCWSTR lpValue, DWORD dwFlags, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData) {
+	DEFINE_NEXT(Hook_RegGetValueW);
+	LPCWSTR spoofed = GetSpoofedRegValue(lpValue);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "RegGetValueW: spoofing '%S' -> '%S'", lpValue, spoofed);
+		return WriteRegistrySZ(spoofed, pdwType, pvData, pcbData);
+	}
+	return next(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+}
+
+LONG WINAPI Shim_Win11VersionLie::Hook_RegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
+	DEFINE_NEXT(Hook_RegQueryValueExW);
+	LPCWSTR spoofed = GetSpoofedRegValue(lpValueName);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "RegQueryValueExW: spoofing '%S' -> '%S'", lpValueName, spoofed);
+		return WriteRegistrySZ(spoofed, lpType, (PVOID)lpData, lpcbData);
+	}
+	return next(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+}
+
+static LPCWSTR GetSpoofedRegValueA(LPCSTR valueName) {
+	if (!valueName) return nullptr;
+	if (_stricmp(valueName, "EditionID") == 0)        return L"Professional";
+	if (_stricmp(valueName, "InstallationType") == 0) return L"Client";
+	if (_stricmp(valueName, "ProductName") == 0)      return L"Windows 11 Pro";
+	return nullptr;
+}
+
+// Like WriteRegistrySZ but converts the wide spoof value to ANSI for callers using A APIs.
+static LONG WriteRegistrySZA(LPCWSTR value, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData) {
+	int needed = WideCharToMultiByte(CP_ACP, 0, value, -1, nullptr, 0, nullptr, nullptr);
+	if (pdwType) *pdwType = REG_SZ;
+	if (!pvData) {
+		if (pcbData) *pcbData = (DWORD)needed;
+		return ERROR_SUCCESS;
+	}
+	if (!pcbData || *pcbData < (DWORD)needed) {
+		if (pcbData) *pcbData = (DWORD)needed;
+		return ERROR_MORE_DATA;
+	}
+	*pcbData = (DWORD)needed;
+	WideCharToMultiByte(CP_ACP, 0, value, -1, (LPSTR)pvData, needed, nullptr, nullptr);
+	return ERROR_SUCCESS;
+}
+
+LONG WINAPI Shim_Win11VersionLie::Hook_RegGetValueA(HKEY hkey, LPCSTR lpSubKey, LPCSTR lpValue, DWORD dwFlags, LPDWORD pdwType, PVOID pvData, LPDWORD pcbData) {
+	DEFINE_NEXT(Hook_RegGetValueA);
+	LPCWSTR spoofed = GetSpoofedRegValueA(lpValue);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "RegGetValueA: spoofing '%s' -> '%S'", lpValue, spoofed);
+		return WriteRegistrySZA(spoofed, pdwType, pvData, pcbData);
+	}
+	return next(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+}
+
+LONG WINAPI Shim_Win11VersionLie::Hook_RegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
+	DEFINE_NEXT(Hook_RegQueryValueExA);
+	LPCWSTR spoofed = GetSpoofedRegValueA(lpValueName);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "RegQueryValueExA: spoofing '%s' -> '%S'", lpValueName, spoofed);
+		return WriteRegistrySZA(spoofed, lpType, (PVOID)lpData, lpcbData);
+	}
+	return next(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+}
+
+DWORD WINAPI Shim_Win11VersionLie::Hook_SHGetValueW(HKEY hkey, LPCWSTR pszSubKey, LPCWSTR pszValue, DWORD* pdwType, void* pvData, DWORD* pcbData) {
+	DEFINE_NEXT(Hook_SHGetValueW);
+	LPCWSTR spoofed = GetSpoofedRegValue(pszValue);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "SHGetValueW: spoofing '%S' -> '%S'", pszValue, spoofed);
+		return WriteRegistrySZ(spoofed, pdwType, pvData, pcbData);
+	}
+	return next(hkey, pszSubKey, pszValue, pdwType, pvData, pcbData);
+}
+
+DWORD WINAPI Shim_Win11VersionLie::Hook_SHGetValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue, DWORD* pdwType, void* pvData, DWORD* pcbData) {
+	DEFINE_NEXT(Hook_SHGetValueA);
+	LPCWSTR spoofed = GetSpoofedRegValueA(pszValue);
+	if (spoofed) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "SHGetValueA: spoofing '%s' -> '%S'", pszValue, spoofed);
+		return WriteRegistrySZA(spoofed, pdwType, pvData, pcbData);
+	}
+	return next(hkey, pszSubKey, pszValue, pdwType, pvData, pcbData);
+}
+
+// IsOS constants (from shlwapi.h)
+#define OS_ANYSERVER     29  // TRUE on any Server edition
+#define OS_TERMINALSERVER 18 // TRUE when Terminal Services is active (always true on Server)
+
+BOOL WINAPI Shim_Win11VersionLie::Hook_IsOS(DWORD dwOS) {
+	DEFINE_NEXT(Hook_IsOS);
+	if (dwOS == OS_ANYSERVER || dwOS == OS_TERMINALSERVER) {
+		ASL_PRINTF(ASL_LEVEL_TRACE, "IsOS(%lu) -> FALSE (spoofed)", dwOS);
+		return FALSE;
+	}
+	return next(dwOS);
+}
+
+// Minimal NT types needed for NtQueryValueKey — avoids pulling in winternl.h/DDK headers.
+struct NT_UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buffer; };
+struct KEY_VALUE_PARTIAL_INFO { ULONG TitleIndex; ULONG Type; ULONG DataLength; UCHAR Data[1]; };
+struct KEY_VALUE_FULL_INFO    { ULONG TitleIndex; ULONG Type; ULONG DataOffset; ULONG DataLength; ULONG NameLength; WCHAR Name[1]; };
+#define NT_KV_FULL_INFO    1
+#define NT_KV_PARTIAL_INFO 2
+// NT status codes
+#define STATUS_BUFFER_TOO_SMALL 0xC0000023L
+#define STATUS_BUFFER_OVERFLOW  0x80000005L
+
+static LPCWSTR GetSpoofedRegValueNt(NT_UNICODE_STRING* us) {
+	if (!us || !us->Buffer || us->Length == 0) return nullptr;
+	ULONG chars = us->Length / sizeof(WCHAR);
+	for (const auto& s : REG_SPOOFS) {
+		if (wcslen(s.name) == chars && _wcsnicmp(us->Buffer, s.name, chars) == 0)
+			return s.value;
+	}
+	return nullptr;
+}
+
+LONG WINAPI Shim_Win11VersionLie::Hook_NtQueryValueKey(HANDLE KeyHandle, PVOID ValueName, ULONG KeyValueInformationClass, PVOID KeyValueInformation, ULONG Length, PULONG ResultLength) {
+	DEFINE_NEXT(Hook_NtQueryValueKey);
+	LONG status = next(KeyHandle, ValueName, KeyValueInformationClass, KeyValueInformation, Length, ResultLength);
+
+	// Only intercept if the value was found (success or buffer-size responses).
+	// Pass through genuine errors like STATUS_OBJECT_NAME_NOT_FOUND.
+	if (status != 0 && status != STATUS_BUFFER_TOO_SMALL && status != STATUS_BUFFER_OVERFLOW)
+		return status;
+
+	LPCWSTR spoofed = GetSpoofedRegValueNt((NT_UNICODE_STRING*)ValueName);
+	if (!spoofed) return status;
+
+	ULONG spoofedBytes = (ULONG)((wcslen(spoofed) + 1) * sizeof(WCHAR));
+
+	if (KeyValueInformationClass == NT_KV_PARTIAL_INFO) {
+		ULONG needed = offsetof(KEY_VALUE_PARTIAL_INFO, Data) + spoofedBytes;
+		if (ResultLength) *ResultLength = needed;
+		if (Length < needed || !KeyValueInformation) return STATUS_BUFFER_TOO_SMALL;
+		KEY_VALUE_PARTIAL_INFO* info = (KEY_VALUE_PARTIAL_INFO*)KeyValueInformation;
+		info->Type = REG_SZ;
+		info->DataLength = spoofedBytes;
+		memcpy(info->Data, spoofed, spoofedBytes);
+		ASL_PRINTF(ASL_LEVEL_TRACE, "NtQueryValueKey(Partial): spoofed '%.*S' -> '%S'", (int)(((NT_UNICODE_STRING*)ValueName)->Length / sizeof(WCHAR)), ((NT_UNICODE_STRING*)ValueName)->Buffer, spoofed);
+		return 0;
+	}
+
+	if (KeyValueInformationClass == NT_KV_FULL_INFO && status == 0 && KeyValueInformation) {
+		KEY_VALUE_FULL_INFO* info = (KEY_VALUE_FULL_INFO*)KeyValueInformation;
+		ULONG needed = info->DataOffset + spoofedBytes;
+		info->Type = REG_SZ;
+		info->DataLength = spoofedBytes;
+		if (ResultLength) *ResultLength = needed;
+		if (Length >= needed) {
+			memcpy((BYTE*)info + info->DataOffset, spoofed, spoofedBytes);
+			ASL_PRINTF(ASL_LEVEL_TRACE, "NtQueryValueKey(Full): spoofed '%.*S' -> '%S'", (int)(((NT_UNICODE_STRING*)ValueName)->Length / sizeof(WCHAR)), ((NT_UNICODE_STRING*)ValueName)->Buffer, spoofed);
+			return 0;
+		}
+		return STATUS_BUFFER_TOO_SMALL;
+	}
+
+	return status;
 }
 
 LONG WINAPI Shim_Win11VersionLie::Hook_RtlGetVersion(LPOSVERSIONINFOW lpVersionInformation) {
