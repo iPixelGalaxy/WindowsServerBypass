@@ -30,6 +30,18 @@ $SdbName        = "Win11VersionLie"
 # --- Presets ---
 $Presets = @{
     "Call of Duty" = @("cod.exe", "cod24-cod.exe", "cod25-cod.exe")
+    "Oculus/Meta"  = @(
+        "OculusSetup.exe", "OculusClient.exe", "OVRServer_x64.exe",
+        "OVRRedir.exe", "OVRServiceLauncher.exe", "OculusDash.exe",
+        "OculusDebugTool.exe", "OVRTray.exe", "OVRUpdate.exe",
+        "MetaQuestLink.exe", "OculusLinkCable.exe", "AirLinkLauncher.exe",
+        "OculusDiagnostics.exe", "OVRPlatformSampleApp.exe", "OculusWorldDemo.exe",
+        "OculusRoomTiny.exe", "OVRPlugin.exe", "OculusInstaller.exe",
+        "OVRMonitorConsole.exe", "OculusPlatformUtil.exe", "OVRLauncher.exe",
+        "OculusXRPlugin.exe", "OVRServiceHost.exe", "OculusKeepalive.exe",
+        "OVRErrorHandler.exe", "OculusDashHelper.exe", "OVRTracking.exe",
+        "OculusLogger.exe", "OVRHeadsetProximity.exe", "OculusBrowser.exe"
+    )
 }
 
 # --- Validate required files ---
